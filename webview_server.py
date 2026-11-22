@@ -403,6 +403,10 @@ class WebViewServer:
                         body = self._read_json_body()
                         return self._json(server.backend.set_model(
                             body.get("core"), body.get("model")))
+                    if path == "/api/set-local-model":   # 本地自选主模型
+                        body = self._read_json_body()
+                        return self._json(server.backend.set_local_model(
+                            body.get("path")))
                     if path == "/api/accel":         # 选定加速版本（下次加载时下载）
                         return self._json(server.backend.set_accel(
                             self._read_json_body().get("variant")))
@@ -415,7 +419,8 @@ class WebViewServer:
                     if path == "/api/browse-file":    # 原生「选择文件」对话框
                         body = self._read_json_body()
                         return self._json(server.backend.browse_file(
-                            body.get("start", ""), body.get("title", "选择文件")))
+                            body.get("start", ""), body.get("title", "选择文件"),
+                            body.get("kind", "exe")))
                     if path == "/api/transcribe":
                         return self._transcribe()
                     if path == "/api/cancel":

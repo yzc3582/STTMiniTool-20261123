@@ -121,9 +121,11 @@ function renderCoreCards() {
     const card = document.createElement("label");
     card.className = "radio-card" + (core.label === _curCore ? " sel" : "");
     card.dataset.core = core.label;
+    // 动作项「从本地选择…」不是真模型，别算进「N 种模型可选」
+    const n = core.models.filter(m => !m.action).length;
     card.innerHTML = `<span class="rd"></span><div class="info">
       <div class="t">${STTUtil.escapeHtml(core.label)}</div>
-      <div class="d">${STTUtil.escapeHtml(T("model.nModels", `${core.models.length} 种模型可选`, { n: core.models.length }))}</div></div>`;
+      <div class="d">${STTUtil.escapeHtml(T("model.nModels", `${n} 种模型可选`, { n }))}</div></div>`;
     host.appendChild(card);
   });
 }
@@ -134,6 +136,7 @@ function populateModels(coreLabel, modelLabel) {
     const o = document.createElement("option");
     o.value = m.label; o.textContent = m.label; o.dataset.arch = m.arch;
     o.dataset.note = m.note || "";
+    if (m.action) o.dataset.action = m.action;   // "browse" = 动作项（不是真模型）
     if (m.label === modelLabel) o.selected = true;
     sel.appendChild(o);
   });
@@ -224,11 +227,40 @@ $("#core-cards").addEventListener("click", async e => {
   await applyModel(_curCore, first);
   await renderAccel();          // 引擎切换 → 加速版本区块显隐/选项随之更新
 });
-// 换模型 → 套用
+// 换模型 → 套用；选中「从本地选择…」→ 先开原生对话框（动作项本身不套用）
 $("#model-select").addEventListener("change", async e => {
+  const opt = e.target.selectedOptions[0];
+  if (opt && opt.dataset.action === "browse") { await pickLocalModel(); return; }
   updateArch();
   await applyModel(_curCore, e.target.value);
 });
+
+// 本地自选模型：选文件 → 写 settings → 重建下拉
+async function pickLocalModel() {
+  let r = null;
+  try { r = await API.browseFile("", T("model.pickLocalTitle", "选择本地模型文件（.bin / .gguf）"), "model"); }
+  catch (err) { modelMsg(String(err), "warn"); }
+  if (!r || !r.ok || !r.path) { await refreshModelOptions(); return; }   // 取消 → 回弹到原选择
+  let res = null;
+  try { res = await API.setLocalModel(r.path); }
+  catch (err) { modelMsg(T("model.applyFail", "套用失败：") + (err.message || err), "warn"); }
+  if (res && res.error) modelMsg(res.error, "warn");
+  await refreshModelOptions(res && res.ok ? res.message : null, res);
+}
+
+// 重取目录 + 当前选择并重建下拉（不重画设备/自检，避免整页闪动）
+// res：setLocalModel 的返回值——按钮文案要靠它的 identityChanged 判断
+// 「已就绪」还是「需重新加载」，不能只看 status（模型文件在、但换了一颗）。
+async function refreshModelOptions(message, res) {
+  try {
+    _modelOpt = await API.getModelOptions();
+    _curCore = _modelOpt.current.core;
+    renderCoreCards();
+    populateModels(_curCore, _modelOpt.current.model);
+    if (message) modelMsg(message, "info");
+    await updateLoadBtn(res || null);
+  } catch (e) {}
+}
 // 转录/加载忙碌 → 引擎卡与模型下拉禁操作（热切换的并发保护）
 function _switchBlocked() { return state.switchBusy; }
 async function applyModel(core, model) {

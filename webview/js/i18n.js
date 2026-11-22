@@ -160,6 +160,7 @@
     "model.inUse": ["使用中", "Active"],
     "model.accelNeeds": ["加速器尚未下载或版本不符（最新 {v}），点「下载并加载模型」时会一并取得。", "Accelerator missing or outdated (latest {v}) — it will be fetched with “Download & load model”."],
     "model.pick": ["选择模型", "Choose a model"],
+    "model.pickLocalTitle": ["选择本地模型文件（.bin / .gguf）", "Choose a local model file (.bin / .gguf)"],
     "model.core": ["推理引擎", "Inference engine"],
     "model.load": ["下载并加载模型", "Download & load model"],
     "model.loading": ["下载／加载中…", "Downloading / loading…"],

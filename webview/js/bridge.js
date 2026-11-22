@@ -140,10 +140,16 @@
       if (MODE === "web") { try { return await apiPost("/api/browse-folder", { start }, { timeoutMs: 0 }); } catch {} }
       return { ok: false, path: "" };
     },
-    // 原生「选择文件」对话框（FFmpeg 可执行文件等）；同上不设超时
-    async browseFile(start) {
-      if (MODE === "web") { try { return await apiPost("/api/browse-file", { start }, { timeoutMs: 0 }); } catch {} }
+    // 原生「选择文件」对话框（FFmpeg 可执行文件 / 本地模型档）；同上不设超时
+    // kind：exe（默认）/ model（*.bin *.gguf）/ fa（*.gguf）→ 决定类型过滤
+    async browseFile(start, title, kind) {
+      if (MODE === "web") { try { return await apiPost("/api/browse-file", { start, title, kind }, { timeoutMs: 0 }); } catch {} }
       return { ok: false, path: "" };
+    },
+    // CrispASR 本地自选模型：传空路径＝改回预设
+    async setLocalModel(path) {
+      if (MODE === "web") return apiPost("/api/set-local-model", { path });
+      return { ok: false, error: "mock 模式不支持本地模型" };
     },
 
     // opts: {file, language, diarize, nSpeakers, align, hint}

@@ -36,6 +36,33 @@ from model_catalog import (_ENGINE_OV, _ENGINE_CASR, _WHISPER_SIZES,
                            _QWEN_CASR_MODELS, _QWEN_CASR_NOTE, _qwen_casr_dl,
                            _COMMON_LANGS)
 
+# ── 本地自选模型（CrispASR）──────────────────────────────────────────────
+# 预设目录之外的 .bin/.gguf 也能用：settings 记绝对路径，加载时优先于预设。
+#   crisp_local_model → 主模型（Whisper GGML / Qwen3-ASR GGUF；后端由
+#                       crisp_engine._infer_backend 依文件名推断）
+# 下拉里的两个特殊条目：已选中的「本地模型：<文件名>」与动作项「从本地选择…」。
+_LOCAL_PICK = "从本地选择…"
+_LOCAL_PREFIX = "本地模型："
+_LOCAL_MIN_BYTES = 1 << 20      # 1 MB 下限：拦下空档 / Git-LFS pointer
+
+
+def _local_file_ok(p) -> bool:
+    """路径指向的档存在且大小像完整模型（排除空档与 LFS pointer）。"""
+    try:
+        p = Path(p).expanduser()
+        return p.is_file() and p.stat().st_size >= _LOCAL_MIN_BYTES
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _local_model(s: dict, key: str = "crisp_local_model") -> Path | None:
+    """settings[key] 指向的本地模型档；未设／失效一律 None（调用端回退预设）。"""
+    raw = str((s or {}).get(key) or "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    return p if _local_file_ok(p) else None
+
 # ── 长音频 FFmpeg 切片转录（纯函数层拆分为 slicing.py）────────────────
 # 切片计划、重叠区合并去重、SRT 解析、跨片说话者匹配等构件见 slicing.py；
 # 本模块保留调度层（_transcribe_sliced）并兼容再导出，tests/ 不受影响。
@@ -335,7 +362,18 @@ class WebBackend(TranscribeService):
             download_crispasr_core(crispasr_dir, progress_cb=self._dl_progress,
                                    variant=variant)
 
-        if crisp_model in _QWEN_CASR_MODELS:
+        # ── 主模型落点：本地自选 > Qwen3 预设 > Whisper 预设 ───────────────
+        # 本地档不套预设、不自动下载；后端由文件名推断（见 crisp_engine
+        # ._infer_backend），故 .bin / *.gguf 都能直接试。
+        local_main = str(s.get("crisp_local_model") or "").strip()
+        if local_main:
+            model_path = Path(local_main).expanduser()
+            if not _local_file_ok(model_path):
+                raise FileNotFoundError(
+                    f"找不到本地模型文件：{model_path}\n"
+                    "请在「选择模型」里重新选择（或改回预设模型）。")
+            self._st(f"使用本地模型：{model_path.name}")
+        elif crisp_model in _QWEN_CASR_MODELS:
             # Qwen3-ASR GGUF（与 OV 模型同置 ov_models/；crisp_engine 依文件名含 "1.7b"
             # 自动推断 --backend qwen3-1.7b）。标准版与日语动漫版共享此路径，仅来源/
             # 文件名不同（由 _qwen_casr_dl 分派）。Q4/Q8 两量化，缺文件自动下载（cstr repo）。
@@ -434,6 +472,9 @@ class WebBackend(TranscribeService):
                 if not quick_check_crispasr(cd):
                     # 核心 exe 缺（不再随包附带，首次使用／换加速版本时才下载）→ 未就绪
                     return False
+                if str(s.get("crisp_local_model") or "").strip():
+                    # 自选本地档：只认这个文件；缺档/移位即未就绪，不悄悄回退预设
+                    return _local_model(s, "crisp_local_model") is not None
                 cm = s.get("crisp_model", "whisper")
                 if cm in _QWEN_CASR_MODELS:
                     _, check_fn, _ = _qwen_casr_dl(cm)
@@ -461,6 +502,8 @@ class WebBackend(TranscribeService):
                 cd = self._crispasr_dir()
                 if not quick_check_crispasr(cd):
                     return False
+                if str(s.get("crisp_local_model") or "").strip():
+                    return _local_model(s, "crisp_local_model") is not None
                 cm = s.get("crisp_model", "whisper")
                 if cm in _QWEN_CASR_MODELS:
                     _, check_fn, _ = _qwen_casr_dl(cm)
@@ -502,6 +545,12 @@ class WebBackend(TranscribeService):
         detail["crispasrDir"] = str(cd)
         if not quick_check_crispasr(cd):        # 与 selected_model_present 同口径：不带 variant
             detail["coreIssue"] = crispasr_core_issue(cd)
+        local_main = str(s.get("crisp_local_model") or "").strip()
+        if local_main:
+            p = Path(local_main).expanduser()
+            if not _local_file_ok(p):
+                detail["missing"] = [str(p)]    # 绝对路径：文件被移动/删除时一眼看出
+            return detail
         cm = s.get("crisp_model", "whisper")
         if cm in _QWEN_CASR_MODELS:
             quant = s.get("crisp_qwen_quant", "q8")
@@ -521,6 +570,8 @@ class WebBackend(TranscribeService):
                                     quick_check_qwen3_asr_gguf, quick_check_qwen3_asr_ja_gguf)
             model_dir = self._model_dir()
             crispasr_dir = self._crispasr_dir()
+            if _local_model(self._settings_raw(), "crisp_local_model") is not None:
+                return True        # 使用者自选的本地模型档也算「已有模型」
             if quick_check(model_dir) or quick_check_1p7b(model_dir):
                 return True
             for q in ("base", "small", "medium", "large", "turbo"):
@@ -725,11 +776,17 @@ class WebBackend(TranscribeService):
         except Exception as e:
             return {"ok": False, "path": "", "error": str(e)}
 
-    def browse_file(self, start: str = "", title: str = "选择文件") -> dict:
-        """弹出原生「选择文件」对话框（用于 FFmpeg 可执行文件路径）。
+    def browse_file(self, start: str = "", title: str = "选择文件",
+                    kind: str = "exe") -> dict:
+        """弹出原生「选择文件」对话框（FFmpeg 可执行文件／本地模型档）。
 
+        kind 决定文件类型过滤：exe（默认）／model（*.bin *.gguf）。
         返回 {"ok": bool, "path": str}；用户取消 → ok=False。
         """
+        types = {
+            "model": [("模型文件（*.bin *.gguf）", "*.bin *.gguf"),
+                      ("所有文件", "*.*")],
+        }.get(kind) or [("可执行文件", "*.exe"), ("所有文件", "*.*")]
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -741,7 +798,7 @@ class WebBackend(TranscribeService):
                 path = filedialog.askopenfilename(
                     title=title, initialdir=str(initial.parent) if initial else "",
                     initialfile=initial.name if initial else "",
-                    filetypes=[("可执行文件", "*.exe"), ("所有文件", "*.*")],
+                    filetypes=types,
                     parent=root)
             finally:
                 root.destroy()
@@ -881,7 +938,9 @@ class WebBackend(TranscribeService):
             else:
                 extra = s.get("crisp_qwen_quant", "q8")   # qwen3 量化也纳入识别
             # 加速版本也纳入识别：换 Vulkan↔CUDA 等同换核心，需重启才生效
-            return ("crispasr", cm, extra, self._crisp_variant())
+            # 本地自选档同理：换文件＝换模型，必须重新加载才生效
+            return ("crispasr", cm, extra, self._crisp_variant(),
+                    str(s.get("crisp_local_model") or ""))
         return ("openvino",)
 
     def _current_selection(self):
@@ -889,6 +948,10 @@ class WebBackend(TranscribeService):
         s = self._settings_raw()
         be = s.get("backend", "openvino")
         if be == "crispasr":
+            # 本地自选档：下拉显示真实文件名（改回预设后此项自动消失）
+            raw_local = str(s.get("crisp_local_model") or "").strip()
+            if raw_local:
+                return (_ENGINE_CASR, _LOCAL_PREFIX + Path(raw_local).name)
             cm = s.get("crisp_model", "whisper")
             if cm == "qwen3-ja":
                 qq = s.get("crisp_qwen_quant", "q8")
@@ -962,6 +1025,19 @@ class WebBackend(TranscribeService):
                 "arch": self._backend_label(be, be),
                 "note": self._note_for(model_label),
             })
+        # CrispASR：预设之后追加「本地自选」两项——已选中的本地档（动态项，便于回填）
+        # 与动作项「从本地选择…」（前端据此开原生文件对话框）。
+        # OpenVINO 模型固定，不提供本地选择。
+        if _ENGINE_CASR in by_core:
+            s = self._settings_raw()
+            raw_local = str(s.get("crisp_local_model") or "").strip()
+            if raw_local:
+                by_core[_ENGINE_CASR].append(
+                    {"label": _LOCAL_PREFIX + Path(raw_local).name, "backend": "crispasr",
+                     "arch": "CrispASR · 本地文件", "note": "", "local": True})
+            by_core[_ENGINE_CASR].append(
+                {"label": _LOCAL_PICK, "backend": "crispasr",
+                 "arch": "CrispASR · 本地文件", "note": "", "action": "browse"})
         active = getattr(self, "_active_backend", None)
         return {
             "cores": [{"label": c, "models": by_core[c]} for c in order],
@@ -971,6 +1047,15 @@ class WebBackend(TranscribeService):
 
     def set_model(self, core_label: str, model_label: str) -> dict:
         """选定 (核心,模型) → 写对应 settings 键、回是否需重启。"""
+        if model_label == _LOCAL_PICK or model_label.startswith(_LOCAL_PREFIX):
+            # 本地档由 set_local_model(路径) 写入；这里只回显，不改动选择
+            return {"ok": True, "core": core_label, "model": model_label,
+                    "backend": "crispasr",
+                    "arch": self._backend_label("crispasr", "crispasr"),
+                    "restartRequired": False,
+                    "canLoadNow": not (self._loading or self._transcribing),
+                    "identityChanged": False, "note": "",
+                    "message": "本地模型请用「从本地选择…」重新指定文件。"}
         entry = next((e for e in _MODEL_CATALOG
                       if e[0] == core_label and e[1] == model_label), None)
         if entry is None:   # 防呆：退回该核心首项 / 目录首项
@@ -978,7 +1063,11 @@ class WebBackend(TranscribeService):
                          _MODEL_CATALOG[0])
         core_label, model_label, backend, patch = entry
 
-        cur = self.settings.update({"backend": backend, **patch})
+        # 选回 CrispASR 预设模型 → 清掉本地自选项，否则加载时本地档仍会盖过预设
+        # （切到 OpenVINO 时不动它：核心切换不该顺手抹掉另一核心的选择）
+        # 注意别就地改 patch：它指向 _MODEL_CATALOG 里的 dict（模块级常量）
+        clear_local = {"crisp_local_model": ""} if backend == "crispasr" else {}
+        cur = self.settings.update({"backend": backend, **patch, **clear_local})
 
         arch = self._backend_label(backend, backend)
         # 热切换：任何时刻都支持就地切换。转录/加载进行中 → 前端禁用切换
@@ -1007,6 +1096,42 @@ class WebBackend(TranscribeService):
             "note": note,
             "message": msg,
         }
+
+    def set_local_model(self, path: str) -> dict:
+        """记下使用者自选的主模型档路径（或传空路径＝改回预设）。
+
+        只接受 Whisper GGML(.bin) 与 Qwen3-ASR GGUF(.gguf)——后端由文件名推断。
+        只写 settings；实际加载仍由「下载并加载模型」触发（身份已变化 → 可切换）。
+        """
+        raw = str(path or "").strip().strip('"')
+        if not raw:
+            self.settings.update({"crisp_local_model": ""})
+            return {"ok": True, "cleared": True, "message": "已改回预设模型。"}
+        p = Path(raw).expanduser()
+        if not p.is_file():
+            return {"ok": False, "error": f"找不到文件：{p}"}
+        if p.suffix.lower() not in (".bin", ".gguf"):
+            return {"ok": False,
+                    "error": "请选择 .bin（Whisper GGML）或 .gguf（Qwen3-ASR）模型档。"}
+        if not _local_file_ok(p):
+            return {"ok": False, "error": "该文件过小，不像是完整模型。"}
+        note = ""
+        try:
+            str(p.resolve()).encode("ascii")
+        except (UnicodeEncodeError, OSError):
+            note = "（提示：路径含非 ASCII 字符，crispasr 可能读不到，建议移到纯英文路径）"
+        cur = self.settings.update({"crisp_local_model": str(p)})
+        # 身份按既有规则算（别硬写 True）：只有真的换了"会加载的东西"才算变化
+        backend = cur.get("backend", "openvino")
+        identity_changed = (self._identity_for(backend, cur)
+                            != getattr(self, "_active_identity", None))
+        return {"ok": True, "path": str(p), "name": p.name,
+                "backend": backend,
+                "arch": self._backend_label(backend, backend),
+                "identityChanged": identity_changed,
+                "canLoadNow": not (self._loading or self._transcribing),
+                "message": (f"已选定本地模型「{p.name}」{note}"
+                            f"　点「下载并加载模型」即可载入。")}
 
     def request_load(self) -> dict:
         """前端「下载并加载模型」→ 触发背景加载（读已持久化的 backend 选择）。
@@ -1213,6 +1338,15 @@ class WebBackend(TranscribeService):
         whisper_size = s.get("whisper_size", "base")
         qwen_quant = s.get("crisp_qwen_quant", "q8")
         fa_quant = s.get("crisp_fa_quant", "q5")
+        local_main = str(s.get("crisp_local_model") or "").strip()
+        # 本地自选主模型单列一项（它可能是 Whisper，也可能是 Qwen3 等其它
+        # CrispASR 后端模型，不能借用下面「OpenAI Whisper 模型」的名义）
+        local_items = []
+        if local_main:
+            local_items.append(
+                item("local_model", f"主模型（本地：{Path(local_main).name}）",
+                     _local_model(s, "crisp_local_model") is not None,
+                     "已下载", "本地文件缺失／已移动，请重新选择"))
         crisp = {
             "label": (f"CRISPASR（{vmeta.get('short') or vmeta['label']}："
                       f"OpenAI Whisper + Qwen）"),
@@ -1222,6 +1356,7 @@ class WebBackend(TranscribeService):
                               f"（{vmeta.get('short') or vmeta['label']}）"),
                      core_ok, "已下载",
                      f"未下载或版本不符（约 {vmeta['size_mb']}MB，启用时下载）"),
+                *local_items,
                 item("whisper", f"OpenAI Whisper 模型（{whisper_size}）",
                      quick_check_whisper_ggml(crispasr_dir, whisper_size),
                      "已下载", "未下载（启用时下载）"),
